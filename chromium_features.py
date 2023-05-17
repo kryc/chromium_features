@@ -5,9 +5,19 @@ import logging
 import os
 import re
 import struct
+from typing import Optional
 import pefile
 
-def find_features(dll: str) -> None:
+def detect_crib(dll: str, rdata_data: bytes) -> Optional[bytes]:
+    if os.path.basename(dll) == 'msedge.dll':
+        # MS Edge uses features of the form ms[A-Z][\w]+
+        m = re.search(b'(ms[A-Z][a-zA-Z]+\0){2}', rdata_data)
+        if m is not None:
+            return m.group(1)
+    return None
+
+
+def find_features(dll: str, crib: str = None) -> None:
     ''' Feature settings are stored as a structure of char*, bool*
     The address of the configuration directly follows this string '''
     pe_hndl = pefile.PE(dll, fast_load=True)
@@ -26,15 +36,22 @@ def find_features(dll: str) -> None:
         rdata_data = file_hndl.read(rdata_section.SizeOfRawData)
         file_hndl.seek(data_section.PointerToRawData, os.SEEK_SET)
         data_data = file_hndl.read(data_section.SizeOfRawData)
-        
-        # Find and ms[A-Z] match
-        m = re.search(b'(ms[A-Z][a-zA-Z]+\0){2}', rdata_data)
-        if m is None:
+
+        # Use provided feature flag or try and detect one
+        if crib is not None:
+            crib = crib.encode('utf8')
+        else:
+            crib = detect_crib(dll, rdata_data)
+
+        # Unable to identify a feature flag
+        if crib is None:
             logging.critical('Unable to find any msFlags')
             return None
+        
+        logging.info(f'Basic logic on feature flag: {crib.decode("utf8")}')
 
         # Find where that string resides in the .rdata section
-        string_sctn_offset = rdata_data.find(m.group(1))
+        string_sctn_offset = rdata_data.find(crib)
         string_offset = rdata_section.PointerToRawData + string_sctn_offset
         string_rva = pe_hndl.get_rva_from_offset(string_offset)
         string_va = pe_hndl.OPTIONAL_HEADER.ImageBase + string_rva
@@ -143,9 +160,10 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Find all Chromium feature flags.')
     parser.add_argument('dll', help='chrome.dll (or equivalent) file to search')
+    parser.add_argument('--crib', help='Known feature flag to base on')
     parser.add_argument('--loglevel', default='INFO', choices=('INFO', 'DEBUG',), help='Set output verbosity')
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.loglevel), format='%(message)s')
 
-    find_features(args.dll)
+    find_features(args.dll, crib=args.crib)
